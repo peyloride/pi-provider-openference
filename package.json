@@ -1,0 +1,10 @@
+{
+  "name": "openference-usage",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Openference provider + request usage support for pi (https://openference.com/docs)",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
