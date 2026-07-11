@@ -1,4 +1,4 @@
-# openference-usage
+# pi-provider-openference
 
 Openference provider for [pi](https://pi.dev). Registers the models and
 handles `/login`. That's it.
@@ -7,9 +7,23 @@ Openference is a curated OpenAI-compatible proxy at `https://api.openference.com
 One API key gets you models from GLM, DeepSeek, Qwen, Kimi, Mistral, and others
 through a single endpoint.
 
+## Install
+
+```bash
+pi install npm:pi-provider-openference
+```
+
+Or from git:
+
+```bash
+pi install git:github.com/peyloride/pi-provider-openference
+```
+
+Then restart pi.
+
 ## Setup
 
-Restart pi after installing, then:
+After installing:
 
 ```bash
 /login openference
