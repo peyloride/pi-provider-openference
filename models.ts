@@ -1,23 +1,25 @@
 /**
- * Openference model discovery + pricing catalog.
+ * Openference model discovery + pricing.
  *
- * Openference exposes a curated, OpenAI-compatible model pool at
- * https://api.openference.com/v1. The `/v1/models` endpoint returns only
- * model IDs (no pricing/context metadata), so we:
- *   1. Fetch IDs dynamically at load time (async factory).
- *   2. Look up per-token pricing from a local catalog keyed by id substring.
- *   3. Fall back to a small static catalog when the API is unreachable or no
- *      API key is configured yet, so `/model` still shows something useful.
+ * GET /v1/models returns model ids plus capability metadata:
+ *   context_length, max_output_tokens, reasoning.supported_efforts
  *
- * Pricing is per 1M tokens (USD), sourced from openference.com/models.
- * Extend PRICING_CATALOG as new models are published. Unknown ids default to
- * zero rates (cost surfaced as "unpriced" in usage reports).
+ * It does not return pricing, so per-token rates come from a local catalog
+ * keyed by id substring. Extend PRICING_CATALOG as new models appear.
  */
 
 import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 
 export const OPENFERENCE_BASE_URL = "https://api.openference.com/v1";
 export const OPENFERENCE_PROVIDER = "openference";
+
+/** Raw shape of one entry in the /v1/models response. */
+export interface OpenferenceModelInfo {
+  id: string;
+  context_length?: number;
+  max_output_tokens?: number | null;
+  reasoning?: { supported_efforts?: string[] } | null;
+}
 
 interface PriceEntry {
   match: RegExp;
@@ -29,9 +31,9 @@ interface PriceEntry {
 }
 
 /**
- * Per-million-token USD rates. Order matters: the first matching entry wins,
- * so put more specific patterns (e.g. deepseek-r1) before generic ones
- * (e.g. deepseek).
+ * Per-million-token USD rates. Order matters: first match wins, so put
+ * specific patterns (deepseek-r1) before generic ones (deepseek).
+ * Sourced from openference.com/models.
  */
 const PRICING_CATALOG: PriceEntry[] = [
   { match: /deyin/i, input: 0.3675, output: 1.0, label: "DeYin (auto-route)" },
@@ -46,19 +48,10 @@ const PRICING_CATALOG: PriceEntry[] = [
   { match: /minimax|abab/i, input: 0.7, output: 2.8, label: "MiniMax" },
 ];
 
-interface ResolvedPrice {
-  input: number;
-  output: number;
-  cacheRead: number;
-  cacheWrite: number;
-  label: string;
-  known: boolean;
-}
-
-export function priceFor(id: string): ResolvedPrice {
+function priceFor(id: string) {
   const entry = PRICING_CATALOG.find((e) => e.match.test(id));
   if (!entry) {
-    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, label: "Unknown", known: false };
+    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, label: "Openference" };
   }
   return {
     input: entry.input,
@@ -66,36 +59,20 @@ export function priceFor(id: string): ResolvedPrice {
     cacheRead: entry.cacheRead ?? 0,
     cacheWrite: entry.cacheWrite ?? 0,
     label: entry.label,
-    known: true,
   };
 }
 
-/** Reasoning-capable model ids (enables pi thinking-level controls). */
-function isReasoning(id: string): boolean {
-  return /(r1|reasoner|reasoning|thinking|glm.*5|o1|o3|qwen.*qvq)/i.test(id);
-}
-
-/** Pretty display name from a raw model id. */
-function prettyName(id: string): string {
+/** Build a pi ProviderModelConfig from a live /v1/models entry. */
+export function toModelConfig(info: OpenferenceModelInfo): ProviderModelConfig {
+  const id = info.id;
   const price = priceFor(id);
-  const label = price.known ? price.label : "Openference";
-  return `${id} (${label})`;
-}
+  const efforts = info.reasoning?.supported_efforts ?? [];
+  const reasoning = efforts.length > 0;
 
-/** Conservative maxTokens per model family; Openference advertises 1M context. */
-function maxTokensFor(id: string): number {
-  if (/glm/i.test(id)) return 131_072;
-  if (/deepseek.*(r1|reasoner)|r1/i.test(id)) return 32_768;
-  return 16_384;
-}
-
-/** Build a pi ProviderModelConfig from a raw Openference model id. */
-export function toModelConfig(id: string): ProviderModelConfig {
-  const price = priceFor(id);
   return {
     id,
-    name: prettyName(id),
-    reasoning: isReasoning(id),
+    name: `${id} (${price.label})`,
+    reasoning,
     input: ["text", "image"],
     cost: {
       input: price.input,
@@ -103,26 +80,27 @@ export function toModelConfig(id: string): ProviderModelConfig {
       cacheRead: price.cacheRead,
       cacheWrite: price.cacheWrite,
     },
-    contextWindow: 1_000_000,
-    maxTokens: maxTokensFor(id),
+    contextWindow: info.context_length ?? 1_000_000,
+    maxTokens: info.max_output_tokens ?? 16_384,
   };
 }
 
-/** Static fallback shown when /v1/models is unreachable (e.g. no API key yet). */
-export const FALLBACK_MODEL_IDS = ["GLM-5.2", "deepseek-v3", "deepseek-r1", "qwen-max"];
+/** Fallback when /v1/models is unreachable (e.g. no API key yet). */
+export const FALLBACK_MODELS: OpenferenceModelInfo[] = [
+  { id: "GLM-5.2", context_length: 1_000_000, max_output_tokens: 131_072, reasoning: { supported_efforts: ["high", "medium", "low"] } },
+  { id: "DeepSeek-V4-Pro", context_length: 1_000_000, max_output_tokens: 131_072, reasoning: { supported_efforts: ["max", "high", "medium", "low"] } },
+  { id: "Qwen3.7 Plus", context_length: 1_000_000, max_output_tokens: 65_536, reasoning: { supported_efforts: ["max", "high", "medium", "low"] } },
+];
 
-/** Fetch live model ids from GET /v1/models. Returns [] on failure. */
-export async function fetchModelIds(apiKey: string | undefined): Promise<string[]> {
+/** Fetch live models from GET /v1/models. Throws on failure. */
+export async function fetchModels(apiKey: string | undefined): Promise<OpenferenceModelInfo[]> {
   const headers: Record<string, string> = { "User-Agent": "pi/openference" };
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
 
   const res = await fetch(`${OPENFERENCE_BASE_URL}/models`, { headers });
   if (!res.ok) {
-    throw new Error(`GET /v1/models → HTTP ${res.status}`);
+    throw new Error(`GET /v1/models -> HTTP ${res.status}`);
   }
-  const json = (await res.json()) as { data?: Array<{ id?: string }> };
-  const ids = (json.data ?? [])
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
-  return ids;
+  const json = (await res.json()) as { data?: OpenferenceModelInfo[] };
+  return (json.data ?? []).filter((m) => typeof m.id === "string" && m.id.length > 0);
 }

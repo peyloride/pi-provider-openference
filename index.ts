@@ -3,8 +3,8 @@
  *
  * Registers the Openference gateway (https://api.openference.com/v1) as a pi
  * provider using its OpenAI-compatible /v1/chat/completions endpoint. Models
- * are fetched live from GET /v1/models at load time so new ones appear without
- * an extension update.
+ * and their context/max-tokens/reasoning metadata are fetched live from
+ * GET /v1/models at load time.
  *
  * Auth is via /login: the key is prompted, validated against /v1/models, and
  * stored in ~/.pi/agent/auth.json. No env var needed.
@@ -17,27 +17,28 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
 import {
-  FALLBACK_MODEL_IDS,
+  FALLBACK_MODELS,
   OPENFERENCE_BASE_URL,
   OPENFERENCE_PROVIDER,
-  fetchModelIds,
+  fetchModels,
   toModelConfig,
+  type OpenferenceModelInfo,
 } from "./models.ts";
 import { FAR_FUTURE_EXPIRES, resolveStartupApiKey } from "./auth.ts";
 
 export default async function (pi: ExtensionAPI) {
   const apiKey = resolveStartupApiKey();
 
-  let modelIds: string[] = [];
+  let models: OpenferenceModelInfo[] = [];
   if (apiKey) {
     try {
-      modelIds = await fetchModelIds(apiKey);
+      models = await fetchModels(apiKey);
     } catch (err) {
       console.warn(`[openference] model discovery failed: ${(err as Error).message}`);
     }
   }
-  if (modelIds.length === 0) {
-    modelIds = FALLBACK_MODEL_IDS;
+  if (models.length === 0) {
+    models = FALLBACK_MODELS;
     if (!apiKey) {
       console.info("[openference] no stored credential found; run /login openference");
     }
@@ -55,7 +56,7 @@ export default async function (pi: ExtensionAPI) {
     api: "openai-completions",
     authHeader: true,
     headers: { "User-Agent": "pi/openference" },
-    models: modelIds.map(toModelConfig),
+    models: models.map(toModelConfig),
     oauth: {
       name: "Openference (API key)",
       async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -68,7 +69,7 @@ export default async function (pi: ExtensionAPI) {
 
         callbacks.onProgress?.("Validating key...");
         try {
-          const ids = await fetchModelIds(key.trim());
+          const ids = await fetchModels(key.trim());
           if (ids.length === 0) throw new Error("key returned no models");
           callbacks.onProgress?.(`Validated: ${ids.length} models available`);
         } catch (err) {
