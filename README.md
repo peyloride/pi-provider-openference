@@ -4,7 +4,7 @@ Openference provider for [pi](https://pi.dev). Registers the models and
 handles `/login`. That's it.
 
 Openference is a curated OpenAI-compatible proxy at `https://api.openference.com/v1`.
-One API key gets you models from GLM, DeepSeek, Qwen, Kimi, Mistral, and others
+One API key gets you models from GLM, DeepSeek, Qwen, Kimi, and others
 through a single endpoint.
 
 ## Install
