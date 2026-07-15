@@ -12,5 +12,5 @@
     "esModuleInterop": true,
     "types": ["node"]
   },
-  "include": ["index.ts", "models.ts", "auth.ts", "test/**/*.ts"]
+  "include": ["index.ts", "models.ts", "auth.ts", "retry.ts", "retry-stream.ts", "test/**/*.ts"]
 }

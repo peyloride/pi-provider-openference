@@ -9,6 +9,17 @@
  * Auth is via /login: the key is prompted, validated against /v1/models, and
  * stored in ~/.pi/agent/auth.json. No env var needed.
  *
+ * Resilience to Openference's intermittent provider errors (e.g. transient
+ * 400 invalid_request_error that succeeds on retry) is handled in two layers:
+ *
+ *   1. In-stream retry (retry-stream.ts) — primary. Wraps the provider's
+ *      streamSimple and retries a failed attempt before any content is emitted.
+ *      Scoped to Openference via a provider-private api id below, so the
+ *      global openai-completions handler (openai/xai/groq/…) is untouched.
+ *   2. message_end normalizer (this file) — backstop. If every in-stream
+ *      attempt fails, rewrites the finalized error so pi's own turn-level
+ *      retry fires.
+ *
  * Usage:
  *   /login openference
  *   /model openference/GLM-5.2
@@ -16,6 +27,11 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
+// Value import: the real OpenAI-completions streamer this provider wraps.
+// Typed narrowly (Model<"openai-completions">) by pi-ai, so cast to the broad
+// BaseStreamFn at the call site — runtime-safe because the streamer only reads
+// model.compat/baseUrl/id/provider and stamps model.api, never gates on it.
+import { streamSimple as openaiStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import {
   FALLBACK_MODELS,
   OPENFERENCE_BASE_URL,
@@ -26,113 +42,30 @@ import {
 } from "./models.ts";
 import { FAR_FUTURE_EXPIRES, resolveStartupApiKey } from "./auth.ts";
 
-// ---------------------------------------------------------------------------
-// Retryable error classification (module-scope + exported for tests).
-// The message_end handler below is a thin wrapper around these pure helpers.
-// Tests import them directly — no pi runtime required.
-// ---------------------------------------------------------------------------
+// Re-export the shared classifier + allowlist so tests importing from
+// index.ts keep working, and so the two retry layers share one source of truth.
+export {
+  RETRYABLE_ERRORS,
+  RETRYABLE_PREFIX,
+  retryableErrorFor,
+  rewriteForRetry,
+  isRetryableStreamError,
+  type RetryableError,
+  type RetryableProbeMessage,
+} from "./retry.ts";
 
-export interface RetryableError {
-  /** Human-readable label; surfaced in the rewritten errorMessage for logs. */
-  label: string;
-  /** Tested (case-insensitive) against the full errorMessage. */
-  pattern: RegExp;
-}
+// Value import for local use in the message_end handler below.
+import { rewriteForRetry } from "./retry.ts";
 
-/**
- * Allowlist of error classes pi does NOT retry by default, surfaced here so
- * pi's built-in exponential-backoff retry fires for them.
- *
- * pi ALREADY retries (don't add — redundant): 429, 500, 502, 503, 504, 524,
- * "rate limit", "too many requests", "overloaded", "service unavailable",
- * "fetch failed", "socket hang up", "connection refused", "timeout",
- * "stream ended without finish_reason", "network_error".
- *
- * This list is for errors pi does NOT retry (e.g. intermittent 400s that
- * Openference's gateway surfaces as client errors). Be specific — an
- * over-broad pattern would retry genuinely broken requests.
- *
- * TO ADD OR REMOVE A RETRYABLE ERROR CLASS: append or delete an entry. No
- * other code changes needed.
- */
-export const RETRYABLE_ERRORS: RetryableError[] = [
-  {
-    // Openference occasionally 400s a request that succeeds on the next attempt.
-    // Match the status + a distinctive token it carries (the error code OR its
-    // specific wording), not bare "400", so deterministic client errors are
-    // not retried. The phrase is matched unquoted so trailing punctuation inside
-    // the JSON message value doesn't defeat the match.
-    label: "intermittent invalid_request_error (400)",
-    pattern: /400[^\n]*(invalid_request_error|the request could not be processed)/i,
-  },
-  // { label: "<describe the transient error>", pattern: /<regex>/i },
-];
-
-/** Prefix that makes pi's retry classifier treat the message as retryable. */
-export const RETRYABLE_PREFIX = "provider returned error";
-
-/** Terminal signals pi must NOT retry (own paths: terminal or compaction). */
-const TERMINAL_ERROR =
-  /insufficient_quota|out of budget|quota exceeded|billing|context_length_exceeded/i;
-
-/** Structural subset of a finalized message — enough to classify retryability. */
-export interface RetryableProbeMessage {
-  role?: string;
-  stopReason?: string;
-  errorMessage?: string;
-  provider?: string;
-}
+import { createRetryStream, type BaseStreamFn } from "./retry-stream.ts";
 
 /**
- * Pure classifier: returns the matching RetryableError entry for an Openference
- * assistant error, or null when the message must NOT be rewritten.
- *
- * Returns null (i.e. no retry) when any of these hold:
- *   - not an assistant message / not an error stopReason (scope guard);
- *   - not from the openference provider (scope guard) — checked against both
- *     `message.provider` and `providerFromModel` (ctx.model?.provider), since the
- *     active model may carry the provider when the message does not;
- *   - errorMessage already rewritten (idempotency) — avoids double-wrapping;
- *   - errorMessage matches a TERMINAL_ERROR (quota / billing / overflow) —
- *     defense in depth so a future broad entry can never shadow pi's own
- *     terminal vs compaction paths.
+ * Provider-private api id. Registering streamSimple under a *custom* api id
+ * (instead of overriding the builtin "openai-completions") is what scopes the
+ * retry wrapper to Openference only — see retry-stream.ts. The streamer is
+ * the real OpenAI-completions one; only the routing key is custom.
  */
-export function retryableErrorFor(
-  message: RetryableProbeMessage,
-  providerFromModel?: string,
-): RetryableError | null {
-  if (message.role !== "assistant") return null;
-  if (message.stopReason !== "error") return null;
-
-  if (
-    message.provider !== OPENFERENCE_PROVIDER &&
-    providerFromModel !== OPENFERENCE_PROVIDER
-  )
-    return null;
-
-  const errorMessage = message.errorMessage ?? "";
-  if (!errorMessage || errorMessage.startsWith(RETRYABLE_PREFIX)) return null;
-  if (TERMINAL_ERROR.test(errorMessage)) return null;
-
-  return RETRYABLE_ERRORS.find((e) => e.pattern.test(errorMessage)) ?? null;
-}
-
-/**
- * Pure: returns the rewritten errorMessage to feed pi's retry classifier, or
- * null when the message should not be rewritten. Same input → same string.
- */
-export function rewriteForRetry(
-  message: RetryableProbeMessage,
-  providerFromModel?: string,
-): string | null {
-  const match = retryableErrorFor(message, providerFromModel);
-  if (!match) return null;
-  return `${RETRYABLE_PREFIX}: ${match.label} (treated as transient). Original: ${message.errorMessage}`;
-}
-
-// ---------------------------------------------------------------------------
-// Provider registration + message_end hook
-// ---------------------------------------------------------------------------
+export const OPENFERENCE_API = "openference-completions";
 
 export default async function (pi: ExtensionAPI) {
   const apiKey = resolveStartupApiKey();
@@ -161,10 +94,13 @@ export default async function (pi: ExtensionAPI) {
     name: "Openference",
     baseUrl: OPENFERENCE_BASE_URL,
     apiKey: "$OPENFERENCE_API_KEY",
-    api: "openai-completions",
+    api: OPENFERENCE_API,
     authHeader: true,
     headers: { "User-Agent": "pi/openference" },
     models: models.map(toModelConfig),
+    // Primary resilience layer: bounded in-stream retry for transient provider
+    // errors, scoped to this provider via OPENFERENCE_API. See retry-stream.ts.
+    streamSimple: createRetryStream(openaiStreamSimple as BaseStreamFn),
     oauth: {
       name: "Openference (API key)",
       async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
@@ -199,11 +135,12 @@ export default async function (pi: ExtensionAPI) {
     },
   });
 
-  // Route selected Openference transient errors into pi's built-in auto-retry
-  // by rewriting errorMessage to a phrase pi's classifier already treats as
-  // retryable ("provider returned error"). The pure decision lives in
-  // retryableErrorFor() / rewriteForRetry() above — see those for the full
-  // rationale, the allowlist, and how to add/remove a retryable error class.
+  // Backstop layer: route selected Openference transient errors into pi's
+  // built-in auto-retry by rewriting errorMessage to a phrase pi's classifier
+  // already treats as retryable ("provider returned error"). Only fires when
+  // the in-stream retry (above) exhausted its budget. The pure decision lives
+  // in retry.ts (retryableErrorFor / rewriteForRetry) — see that file for the
+  // allowlist and how to add/remove a retryable error class.
   pi.on("message_end", (event, ctx) => {
     const rewrite = rewriteForRetry(event.message, ctx.model?.provider);
     if (!rewrite) return;
