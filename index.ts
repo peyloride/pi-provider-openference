@@ -27,11 +27,6 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai";
-// Value import: the real OpenAI-completions streamer this provider wraps.
-// Typed narrowly (Model<"openai-completions">) by pi-ai, so cast to the broad
-// BaseStreamFn at the call site — runtime-safe because the streamer only reads
-// model.compat/baseUrl/id/provider and stamps model.api, never gates on it.
-import { streamSimple as openaiStreamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import {
   FALLBACK_MODELS,
   OPENFERENCE_BASE_URL,
@@ -58,6 +53,25 @@ export {
 import { rewriteForRetry } from "./retry.ts";
 
 import { createRetryStream, type BaseStreamFn } from "./retry-stream.ts";
+
+// The raw OpenAI-completions streamer this provider wraps.
+//
+// Reachability: pi's extension loader (jiti) only resolves the compat/oauth
+// entries of @earendil-works/pi-ai (it aliases them to compat.js / oauth.js).
+// Subpath imports like "@earendil-works/pi-ai/api/openai-completions" do NOT
+// resolve under jiti (mangled to "compat.js/api/..."), so we cannot import
+// the streamer from its own api entry. compat.js DOES re-export it via
+// legacy-api-aliases as `streamSimpleOpenAICompletions`, so we pull it from
+// the compat specifier (which jiti aliases) instead.
+//
+// Type/runtime split: compat.d.ts omits that legacy re-export, so tsc doesn't
+// know the binding exists — access it via a cast. Verified (native import)
+// that this binding is the RAW streamer (not the compat dispatcher, not
+// api-guarded), so openference-completions models flow through unchanged.
+import * as piAiCompat from "@earendil-works/pi-ai/compat";
+const openaiStreamSimple = (piAiCompat as unknown as {
+  streamSimpleOpenAICompletions: BaseStreamFn;
+}).streamSimpleOpenAICompletions;
 
 /**
  * Provider-private api id. Registering streamSimple under a *custom* api id
@@ -100,7 +114,7 @@ export default async function (pi: ExtensionAPI) {
     models: models.map(toModelConfig),
     // Primary resilience layer: bounded in-stream retry for transient provider
     // errors, scoped to this provider via OPENFERENCE_API. See retry-stream.ts.
-    streamSimple: createRetryStream(openaiStreamSimple as BaseStreamFn),
+    streamSimple: createRetryStream(openaiStreamSimple),
     oauth: {
       name: "Openference (API key)",
       async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {

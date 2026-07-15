@@ -1,6 +1,6 @@
 {
   "name": "pi-provider-openference",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Openference provider for pi — OpenAI-compatible endpoint with /login flow and live model discovery",
   "type": "module",
   "main": "index.ts",
