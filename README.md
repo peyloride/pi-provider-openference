@@ -55,10 +55,11 @@ model restrictions in the dashboard later and run `/reload` to re-fetch.
 
 ## Resilience
 
-Openference occasionally surfaces a transient `400 invalid_request_error` for a
-request that succeeds on retry. pi does not retry 4xx by default (correctly,
-since they're normally deterministic), so this package adds two cooperating
-layers that read one shared allowlist (`retry.ts`):
+Openference occasionally surfaces transient errors that succeed on retry:
+a `400 invalid_request_error` (which pi does not retry, since 4xx are normally
+deterministic) and `5xx` server errors (which pi does retry, but surfaces the
+raw server response text while doing so). This package adds two cooperating
+layers:
 
 1. In-stream retry (`retry-stream.ts`), the primary layer. It wraps the
    provider's stream function and retries a failed attempt before any content
@@ -69,34 +70,47 @@ layers that read one shared allowlist (`retry.ts`):
    attempt also fails, it rewrites the finalized error so pi's own turn-level
    retry fires.
 
+The in-stream layer retries both 400 (intermittent) and 5xx (server) errors
+silently. The message_end backstop only rewrites 400s (5xx are left to pi's
+native retry, keeping the final error message cleaner).
+
 Budget: 5 attempts, 1000ms base, exponential backoff capped at 8000ms.
 
 ## Adding retryable errors
 
-The retryable error classes live in a single editable allowlist in
-[`retry.ts`](./retry.ts), the `RETRYABLE_ERRORS` array. Both retry layers read
-it, so adding an entry makes it retryable everywhere and deleting one removes
-it. No other code changes are needed.
+There are two editable allowlists in [`retry.ts`](./retry.ts):
 
-pi already retries 429, 5xx, overloaded, network, and timeout errors itself, so
-don't add those. They're redundant, and an over-broad pattern risks retrying
-genuinely broken requests. The allowlist is for errors pi does not retry by
-default.
+- `RETRYABLE_ERRORS` — errors pi does NOT retry on its own (e.g. intermittent
+  400s). Both layers read this: in-stream retries silently, and the message_end
+  backstop rewrites the error so pi's turn retry fires.
+- `STREAM_RETRYABLE_ERRORS` — errors pi DOES retry at turn level (5xx), but
+  that the in-stream layer also retries silently first so the raw server error
+  text never reaches you during retries. Only the in-stream layer reads this;
+  the message_end backstop leaves these to pi's native handling.
 
 To add one, append an entry with a human-readable `label` and a `pattern`
-(a RegExp matched case-insensitively against the full `errorMessage`):
+(a RegExp matched case-insensitively against the full `errorMessage`) to the
+appropriate array. Use `RETRYABLE_ERRORS` for errors pi doesn't retry (both
+layers), or `STREAM_RETRYABLE_ERRORS` for errors pi does retry that you also
+want retried silently in-stream:
 
 ```ts
+// Errors pi does NOT retry — both layers handle them.
 export const RETRYABLE_ERRORS: RetryableError[] = [
   {
     label: "intermittent invalid_request_error (400)",
     pattern: /400[^\n]*(invalid_request_error|the request could not be processed)/i,
   },
-  // Your new entry:
+  // Your new entry here...
+];
+
+// Errors pi DOES retry — in-stream layer retries them silently too.
+export const STREAM_RETRYABLE_ERRORS: RetryableError[] = [
   {
-    label: "describe the transient error",
-    pattern: /<regex matched against the full errorMessage>/i,
+    label: "server error (5xx)",
+    pattern: /\b5\d{2}\b/,
   },
+  // ...here.
 ];
 ```
 

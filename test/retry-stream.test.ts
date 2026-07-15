@@ -169,13 +169,37 @@ test("the failed attempt's buffered `start` is NOT emitted to the consumer", asy
 
 // --- no-retry paths --------------------------------------------------------
 
-test("non-retryable HTTP error (500) is passed through, no retry", async () => {
-  const base = scriptedBaseStream([[start(), error("500: internal server error")]]);
+test("non-retryable HTTP error (404) is passed through, no retry", async () => {
+  const base = scriptedBaseStream([[start(), error("404: model not found")]]);
   const sleeps: number[] = [];
   const events = await collect(wrapWith(base, sleeps)(MODEL, CONTEXT));
   assert.deepEqual(types(events), ["start", "error"]);
   assert.deepEqual(sleeps, []);
   assert.equal(events[events.length - 1].type, "error");
+});
+
+test("5xx errors (including 502 with ugly SSE body) are retried in-stream", async () => {
+  // This is the real Openference 502: the provider's streaming endpoint
+  // returns errors as SSE, so the body carries `data: {...}` and `data: [DONE]`.
+  // The wrapper retries it silently and the user never sees the raw text.
+  const ugly502 =
+    '502: data: {"error":{"message":"The model provider is temporarily unavailable. Please try again in a moment.","type":"server_error"}}\n\ndata: [DONE]';
+  const base = scriptedBaseStream([
+    [start(), error(ugly502)], // attempt 1: 502
+    [start(), text("ok"), done()], // attempt 2: success
+  ]);
+  const sleeps: number[] = [];
+  const events = await collect(wrapWith(base, sleeps, { maxAttempts: 5, baseDelayMs: 1000 })(MODEL, CONTEXT));
+  assert.deepEqual(types(events), ["start", "text_delta", "done"]);
+  assert.deepEqual(sleeps, [1000]);
+});
+
+test("5xx with a terminal signal (503 billing) is NOT retried", async () => {
+  const base = scriptedBaseStream([[start(), error("503: billing issue, upgrade required")]]);
+  const sleeps: number[] = [];
+  const events = await collect(wrapWith(base, sleeps)(MODEL, CONTEXT));
+  assert.deepEqual(types(events), ["start", "error"]);
+  assert.deepEqual(sleeps, []);
 });
 
 test("terminal errors (context_length_exceeded) are never retried", async () => {

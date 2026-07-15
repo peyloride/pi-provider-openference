@@ -41,6 +41,7 @@ import { FAR_FUTURE_EXPIRES, resolveStartupApiKey } from "./auth.ts";
 // index.ts keep working, and so the two retry layers share one source of truth.
 export {
   RETRYABLE_ERRORS,
+  STREAM_RETRYABLE_ERRORS,
   RETRYABLE_PREFIX,
   retryableErrorFor,
   rewriteForRetry,

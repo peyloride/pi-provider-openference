@@ -12,9 +12,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   RETRYABLE_ERRORS,
+  STREAM_RETRYABLE_ERRORS,
   RETRYABLE_PREFIX,
   retryableErrorFor,
   rewriteForRetry,
+  isRetryableStreamError,
   type RetryableProbeMessage,
 } from "../index.ts";
 
@@ -148,9 +150,12 @@ test("rewriteForRetry returns null for non-retryable messages", () => {
 
 // --- no shadowing of pi-native retryable classes ---------------------------
 
-test("native-pi retryable errors (429/5xx/overloaded/network) are left to pi", () => {
-  // These are already retried by pi's own classifier. Our handler must be a
-  // no-op for them (return null) so it never conflicts or double-tags.
+test("native-pi retryable errors (429/5xx/overloaded/network) are left to pi's message_end layer", () => {
+  // These are already retried by pi's own classifier. The message_end backstop
+  // must be a no-op for them (return null) so it never conflicts or double-tags.
+  // Note: 5xx ARE retried by the in-stream layer (isRetryableStreamError),
+  // but NOT rewritten by the message_end backstop (retryableErrorFor) —
+  // tested separately below.
   const nativeRetryable = [
     '429: {"message":"Too many requests"}',
     '503: {"message":"Service unavailable"}',
@@ -164,4 +169,49 @@ test("native-pi retryable errors (429/5xx/overloaded/network) are left to pi", (
   for (const body of nativeRetryable) {
     assert.equal(retryableErrorFor(msg({ errorMessage: body })), null, `body: ${body}`);
   }
+});
+
+// --- in-stream layer: 5xx handled silently, message_end backstop skips them --
+
+test("isRetryableStreamError retries 5xx (in-stream only)", () => {
+  const fiveXX = [
+    '502: data: {"error":{"type":"server_error"}}\n\ndata: [DONE]',
+    '500: internal server error',
+    '503: service unavailable',
+    '504: gateway timeout',
+    '524: cloudflare timeout',
+  ];
+  for (const body of fiveXX) {
+    assert.equal(isRetryableStreamError(body), true, `body: ${body}`);
+  }
+});
+
+test("message_end backstop does NOT rewrite 5xx (left to pi native)", () => {
+  // 5xx is in STREAM_RETRYABLE_ERRORS (in-stream) but NOT in RETRYABLE_ERRORS
+  // (message_end). This keeps the final error message clean and avoids
+  // redundantly rewriting something pi already retries.
+  const fiveXX = [
+    '502: data: {"error":{"type":"server_error"}}\n\ndata: [DONE]',
+    '500: internal server error',
+    '503: service unavailable',
+  ];
+  for (const body of fiveXX) {
+    assert.equal(retryableErrorFor(msg({ errorMessage: body })), null, `body: ${body}`);
+    assert.equal(rewriteForRetry(msg({ errorMessage: body })), null, `body: ${body}`);
+  }
+});
+
+test("isRetryableStreamError does NOT retry terminal 5xx (billing/quota on a 503)", () => {
+  assert.equal(isRetryableStreamError('503: billing issue'), false);
+  assert.equal(isRetryableStreamError('503: quota exceeded'), false);
+});
+
+test("isRetryableStreamError still retries the intermittent 400 (shared list)", () => {
+  const body = '400: {"type":"invalid_request_error","message":"The request could not be processed"}';
+  assert.equal(isRetryableStreamError(body), true);
+});
+
+test("STREAM_RETRYABLE_ERRORS ships the 5xx entry", () => {
+  assert.equal(STREAM_RETRYABLE_ERRORS.length, 1);
+  assert.match(STREAM_RETRYABLE_ERRORS[0].label, /5xx/);
 });
