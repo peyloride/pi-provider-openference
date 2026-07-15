@@ -10,7 +10,7 @@
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "esModuleInterop": true,
-    "types": []
+    "types": ["node"]
   },
-  "include": ["index.ts", "models.ts", "auth.ts"]
+  "include": ["index.ts", "models.ts", "auth.ts", "test/**/*.ts"]
 }
