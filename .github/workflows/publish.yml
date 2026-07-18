@@ -15,12 +15,13 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write  # OIDC for npm trusted publishing (no token needed)
     steps:
       - uses: actions/checkout@v7
 
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'  # bundles npm 11.x (trusted publishing needs >=11.5.1)
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
@@ -42,10 +43,11 @@ jobs:
             npm version "$VERSION" --no-git-tag-version
           fi
 
+      # Trusted publishing via OIDC — no NPM_TOKEN secret. npm auto-detects
+      # the GitHub Actions OIDC environment and exchanges a short-lived token.
+      # Requires the trusted publisher to be linked on npmjs.com package settings.
       - name: Publish
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Push version bump (manual dispatch)
         if: github.event_name == 'workflow_dispatch'
