@@ -69,7 +69,22 @@ export const RETRYABLE_ERRORS: RetryableError[] = [
     label: "intermittent invalid_request_error (400)",
     pattern: /400[^\n]*(invalid_request_error|the request could not be processed)/i,
   },
-  // { label: "<describe the transient error>", pattern: /<regex>/i },
+  {
+    // Openference's upstream provider can drop mid-stream, producing a truncated
+    // JSON response that fails to parse. The OpenAI SDK throws a SyntaxError
+    // with "Unterminated string in JSON" — this is transient (next attempt gets
+    // a complete response). Not a 4xx/5xx, so pi's native retry ignores it.
+    label: "truncated JSON response (unterminated string)",
+    pattern: /unterminated string in json/i,
+  },
+  {
+    // Openference's upstream can interrupt the SSE stream before the response
+    // completes. The openai-completions streamer surfaces this as
+    // "The model provider's stream was interrupted. Please retry."
+    // Not a 4xx/5xx, so pi's native retry ignores it.
+    label: "stream interrupted",
+    pattern: /stream was interrupted/i,
+  },
 ];
 
 /**

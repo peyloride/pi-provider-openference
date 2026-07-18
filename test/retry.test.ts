@@ -31,11 +31,16 @@ function msg(overrides: Partial<RetryableProbeMessage> = {}): RetryableProbeMess
   };
 }
 
-test("RETRYABLE_ERRORS ships the intermittent 400 entry", () => {
-  assert.equal(RETRYABLE_ERRORS.length, 1, "expected exactly one entry by default");
-  const [entry] = RETRYABLE_ERRORS;
-  assert.equal(entry.label, "intermittent invalid_request_error (400)");
-  assert.ok(entry.pattern instanceof RegExp);
+test("RETRYABLE_ERRORS ships the expected entries", () => {
+  assert.ok(RETRYABLE_ERRORS.length >= 3,
+    `expected at least 3 entries, got ${RETRYABLE_ERRORS.length}`);
+  const labels = RETRYABLE_ERRORS.map((e) => e.label);
+  assert.ok(labels.some((l) => l.includes("intermittent")));
+  assert.ok(labels.some((l) => l.includes("unterminated")));
+  assert.ok(labels.some((l) => l.includes("stream interrupted")));
+  for (const entry of RETRYABLE_ERRORS) {
+    assert.ok(entry.pattern instanceof RegExp);
+  }
 });
 
 // --- scope guards -----------------------------------------------------------
@@ -94,6 +99,37 @@ test("does NOT retry a bare 400 without the invalid_request_error signature", ()
   assert.equal(retryableErrorFor(msg({ errorMessage: '400: {"message":"model not found"}' })), null);
   assert.equal(retryableErrorFor(msg({ errorMessage: '400: bad request' })), null);
   assert.equal(retryableErrorFor(msg({ errorMessage: "Bad Request" })), null);
+});
+
+// --- truncated JSON / stream interruption ---------------------------------
+
+test("matches the real Unterminated string in JSON stream error", () => {
+  const m = msg({
+    errorMessage: "Unterminated string in JSON at position 55 (line 1 column 56)",
+  });
+  assert.ok(retryableErrorFor(m) !== null);
+  assert.ok(isRetryableStreamError(m.errorMessage!));
+});
+
+test("matches the real stream interrupted error", () => {
+  const m = msg({
+    errorMessage: "The model provider's stream was interrupted. Please retry.",
+  });
+  assert.ok(retryableErrorFor(m) !== null);
+  assert.ok(isRetryableStreamError(m.errorMessage!));
+});
+
+test("unterminated string / stream interrupted are NOT classed as terminal", () => {
+  // Defense: these must not be shadowed by TERMINAL_ERROR patterns.
+  const bodies = [
+    "Unterminated string in JSON at position 55 (line 1 column 56)",
+    "The model provider's stream was interrupted. Please retry.",
+  ];
+  for (const body of bodies) {
+    const rewrite = rewriteForRetry(msg({ errorMessage: body }));
+    assert.ok(rewrite, `expected rewrite for: ${body}`);
+    assert.ok(rewrite!.startsWith(RETRYABLE_PREFIX));
+  }
 });
 
 // --- terminal guard (defense in depth) -------------------------------------
