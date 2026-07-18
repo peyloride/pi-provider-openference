@@ -34,7 +34,7 @@ import { isRetryableStreamError } from "./retry.ts";
  * user is waiting for the *first* token of a live stream, so latency matters
  * more than for a whole-turn retry.
  */
-export const MAX_ATTEMPTS = 5;
+export const MAX_ATTEMPTS = 12;
 
 /** Base backoff delay (ms) for the first retry; doubles each attempt. */
 export const BASE_DELAY_MS = 1000;
@@ -43,7 +43,7 @@ export const BASE_DELAY_MS = 1000;
  * Per-attempt backoff cap (ms). Without it the exponential series reaches
  * impractically long single sleeps; capping keeps the worst-case stall bounded.
  */
-export const MAX_DELAY_MS = 8000;
+export const MAX_DELAY_MS = 30000;
 
 /** The underlying stream function this wrapper retries around. */
 export type BaseStreamFn = (

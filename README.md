@@ -74,7 +74,7 @@ The in-stream layer retries both 400 (intermittent) and 5xx (server) errors
 silently. The message_end backstop only rewrites 400s (5xx are left to pi's
 native retry, keeping the final error message cleaner).
 
-Budget: 5 attempts, 1000ms base, exponential backoff capped at 8000ms.
+Budget: 12 attempts, 1000ms base, exponential backoff capped at 30000ms.
 
 ## Adding retryable errors
 
