@@ -1,5 +1,9 @@
 # pi-provider-openference
 
+> ⚠️ **Not recommended.** This provider is inconsistent — expect frequent
+> errors, low TPS, and reliability issues. I don't recommend it for
+> production or daily use. You have been warned.
+
 > ⚠️ **Vibe-coded.** This provider was written with AI assistance and no formal
 > review; treat it accordingly. That said, I run it myself as a daily driver, so
 > breakage tends to get noticed and fixed fast. Bug reports welcome.
